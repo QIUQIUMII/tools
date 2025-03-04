@@ -1,12 +1,15 @@
+#coding = 'utf-8'
 import os
 import subprocess
 import time
 import json
 from xml.dom.minidom import Element
+from xml.dom import  minidom
+from lxml import etree
 from concurrent.futures import ThreadPoolExecutor
 
 import openpyxl  # pip install openpyxl
-from androguard.core.bytecodes.apk import APK  # pip install androguard
+from androguard.core.apk import APK
 
 class APKAnalyzer:
     """
@@ -47,7 +50,13 @@ class APKAnalyzer:
         apk = APK(self.apk_path)
         self.package_name = apk.get_package()
         manifest_xml = apk.get_android_manifest_xml()
+        # manifest_xml_str = apk.get_android_manifest_xml()
+        # print(type(manifest_xml_str)) #<class 'lxml.etree._Element'>
+        # manifest_xml = minidom.parseString(manifest_xml_str)
 
+        #将<class 'lxml.etree._Element'>转换成minidom
+        manifest_xml = minidom.parseString(etree.tostring(manifest_xml, encoding="unicode"))
+        print(manifest_xml.toprettyxml(indent=""))
         activities_info = []
         activity_elements = manifest_xml.getElementsByTagName("activity")
 
@@ -480,7 +489,7 @@ def main(apk_path, output_xlsx, target_url, concurrency=1, interval=2):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="自动化测试：检测 APK 是否存在可能的 WebView 任意 URL 加载攻击面")
-    parser.add_argument("apk", help="待分析的APK文件路径")
+    parser.add_argument("-apk", help="待分析的APK文件路径")
     parser.add_argument("-o", "--output", default="analysis_result.xlsx", help="输出Excel文件")
     parser.add_argument("-u", "--url", default="https://mymalware.com", help="测试时使用的URL")
     parser.add_argument("-c", "--concurrency", type=int, default=1, help="并发线程数")
