@@ -5,12 +5,15 @@ import time
 import json
 from xml.dom.minidom import Element
 from xml.dom import  minidom
+
+from gitdb.util import mkdir
 from lxml import etree
 from concurrent.futures import ThreadPoolExecutor
 import openpyxl  # pip install openpyxl
 # from androguard.core.apk import APK
 from androguard.core.bytecodes.apk import APK
 from androguard.misc import AnalyzeAPK
+import sqlite3
 
 class AppAnalyzer:
     def __init__(self, apk_path):
@@ -54,7 +57,7 @@ class AppAnalyzer:
 
             # 2) 获取 exported
             exported_val = activity_element.getAttribute("android:exported").lower().strip()
-            
+
             # 3) 获取 permission
             permission_val = activity_element.getAttribute("android:permission").strip()
 
@@ -156,3 +159,59 @@ class AppAnalyzer:
             result.append(filter_obj)
 
         return result
+
+    def store_activities_in_db(self):
+        """
+        执行 analyze_activities() 并且将结果存入数据库。
+        表：activity_info
+        列：(package_name, activity_name, exported, permission, intent_filters)
+        键：(package_name, activity_name)
+        若表不存在就创建；
+        若有重复键则替换（INSERT OR REPLACE）。
+        """
+        db_path = './apk_info.db'
+
+        # 获取所有 Activity 信息
+        activities_info = self.analyze_activities()
+
+        # 连接数据库，不存在则会自动创建
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # 创建表（如果不存在）
+        create_table_sql = """
+        CREATE TABLE IF NOT EXISTS activity_info (
+            package_name   TEXT NOT NULL,
+            activity_name  TEXT NOT NULL,
+            exported       TEXT,
+            permission     TEXT,
+            intent_filters TEXT,
+            PRIMARY KEY (package_name, activity_name)
+        )
+        """
+        cursor.execute(create_table_sql)
+
+        # 插入或替换数据
+        insert_sql = """
+        INSERT OR REPLACE INTO activity_info 
+            (package_name, activity_name, exported, permission, intent_filters)
+        VALUES 
+            (?, ?, ?, ?, ?)
+        """
+
+        for activity in activities_info:
+            # 将 intent_filters 转成 JSON 字符串存储
+            # 如果你不需要存储 intent_filters，可以去掉
+            intent_filters_json = json.dumps(activity["intent_filters"]) if activity["intent_filters"] else None
+
+            cursor.execute(insert_sql, (
+                self.package_name,
+                activity["activityName"],
+                activity["exported"],
+                activity["permission"],
+                intent_filters_json
+            ))
+
+        # 提交更改并关闭连接
+        conn.commit()
+        conn.close()
