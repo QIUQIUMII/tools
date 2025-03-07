@@ -25,7 +25,7 @@ class AppAnalyzer:
         # 加载并解析 APK 文件，a 为 APK 对象，d 为 DalvikVMFormat 对象，dx 为 Analysis 对象
         self.apk, self.d, self.dx = AnalyzeAPK(apk_path)
         self.apk_path = apk_path
-        self.package_name = self.apk.getPackageName()
+        self.package_name = self.apk.get_package()
         manifest_xml = self.apk.get_android_manifest_xml()
         self.manifest_xml = minidom.parseString(etree.tostring(manifest_xml, encoding="unicode"))
 
@@ -169,7 +169,7 @@ class AppAnalyzer:
         若表不存在就创建；
         若有重复键则替换（INSERT OR REPLACE）。
         """
-        db_path = './apk_info.db'
+        db_path = './all.db'
 
         # 获取所有 Activity 信息
         activities_info = self.analyze_activities()
@@ -215,3 +215,128 @@ class AppAnalyzer:
         # 提交更改并关闭连接
         conn.commit()
         conn.close()
+
+class AttackSurfaceInspector:
+    """
+    从all.db中获取相关数据后分析。并插入分析结果。
+    """
+    def __init__(self, package_name):
+        self.db_path = './all.db'
+        self.package_name = package_name
+
+    def activity_inspector(self):
+        '''
+        从 activity_info 表中读取 self.package_name 的 activity 信息。然后分析各个活动是否是攻击面。
+        1. 在 activity_info 中的列 is_attack_surface (如果不存在则新建此列)记录分析结果。
+        2. 在 activity_info 中的列 prot_level (如果不存在则新建此列)记录所使用的权限级别。
+        3. 在 activity_info 中的列 used_free_permission (如果不存在则新建此列)记录是否使用了游离权限。
+
+        如果一个 activity 满足下面所有条件，则它是攻击面（第三方普通应用无条件调用该 Activity）：
+            1. android:exported="true"（明确允许导出。在 Android 12+ 中，如果存在 <intent-filter> ，则必须显式声明是否导出。所以这里不再考虑未设置 exported 属性的隐式调用情况）
+            2. 权限设置允许调用：要么没有设置 android:permission，要么设置的权限是普通（normal）级别，要么设置的权限不存在（游离权限）
+        '''
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # 检查并新增所需列（如果不存在）
+        self._insert_column(conn, "activity_info", ["is_attack_surface", "prot_level", "used_free_permission"])
+
+        # 读取当前 package 下的所有 activity 信息
+        select_sql = """
+        SELECT package_name, activity_name, exported, permission 
+        FROM activity_info 
+        WHERE package_name = ?
+        """
+        cursor.execute(select_sql, (self.package_name,))
+        rows = cursor.fetchall()
+
+        for row in rows:
+            package_name, activity_name, exported, permission = row
+
+            # 默认分析结果
+            is_attack_surface = "false"
+            prot_level_result = None
+            used_free_permission = "false"
+
+            # 获取该权限的保护级别
+            perm_level = self._check_permission(permission)
+
+            # 判断条件1：必须明确导出
+            if exported is not None and exported.lower() == "true":
+                # 判断条件2：权限允许调用
+                if permission is None or permission.strip() == "":
+                    # 未设置权限，允许调用
+                    is_attack_surface = "true"
+                    used_free_permission = "false"
+
+                else:
+                    if perm_level is None:
+                        # 权限未在 permission_info 中找到，视为游离权限
+                        is_attack_surface = "true"
+                        used_free_permission = "true"
+                    elif "normal" in perm_level.lower():
+                        is_attack_surface = "true"
+                        prot_level_result = perm_level
+                    else:
+                        # 权限保护级别不为 normal ，则不允许第三方调用
+                        prot_level_result = perm_level
+            else:
+                prot_level_result = self._check_permission(permission)
+
+
+            # 更新数据库中对应的记录
+            update_sql = """
+            UPDATE activity_info
+            SET is_attack_surface = ?,
+                prot_level = ?,
+                used_free_permission = ?
+            WHERE package_name = ? AND activity_name = ?
+            """
+            cursor.execute(update_sql, (
+                is_attack_surface,
+                prot_level_result,
+                used_free_permission,
+                package_name,
+                activity_name
+            ))
+
+        conn.commit()
+        conn.close()
+
+    def _insert_column(self, conn, table_name, column_names, column_type="TEXT"):
+        """
+        检查 table_name 表是否存在 column 列，
+        若不存在则通过 ALTER TABLE 添加。
+        """
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info{table_name}")
+        existing_columns = [row[1] for row in cursor.fetchall()]  # row[1] 是列名
+        for column_name in column_names:
+            if column_name not in existing_columns:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+        conn.commit()
+
+    def _check_permission(self, permission_name):
+        """
+        从 permission_info 表中读取 permission_name 对应的 prot_level 信息。
+        :param permission_name: 权限名称
+        :return: 返回权限保护级别字符串，如果未找到则返回 None
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT prot_level FROM permission_info WHERE permission_name = ?",
+                (permission_name,)
+            )
+            result = cursor.fetchone()
+            prot_level = result[0] if result else None
+        except sqlite3.Error as e:
+            prot_level = None
+        conn.close()
+        return prot_level
+
+
+if __name__ == "__main__":
+    analyzer = AppAnalyzer('./base.apk')
+    analyzer.store_activities_in_db()
